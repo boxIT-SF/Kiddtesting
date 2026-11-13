@@ -133,7 +133,7 @@ function Invoke-Msi {
 function Install-Agent {
     param([string]$MsiPath, [string]$TokenId, [string]$Label)
     $log  = Join-Path $WorkDir "install-$Label.log"
-    $args = "/i `"$MsiPath`" /qn /norestart /L*v `"$log`""
+    $msiArgs = "/i`"$MsiPath`" /qn /norestart /L*v `"$log`""
     if ($TokenId) { $msiArgs += " TOKENID=`"$TokenId`"" }
     $code = Invoke-Msi $msiArgs
     Write-Log "msiexec install ($Label) exit code $code."
