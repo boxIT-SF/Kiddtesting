@@ -109,11 +109,29 @@ function Get-AgentInfo {
 
 function Get-Installer {
     param([string]$Url, [string]$Path, [switch]$NoSignatureCheck)
-    if ($Url -notmatch '^https://') { throw "Installer URL must be HTTPS: $Url" }
+    $label = Split-Path $Path -Leaf
+    if ($Url -notmatch '^https://') { throw "[$label] Installer URL must be HTTPS." }
+    $uri = [uri]$Url
+    # Log host and path only. The full URL can carry a token.
+    $safeUrl = '{0}{1}' -f $uri.Host, ($uri.AbsolutePath -replace '/installer/[^/]+/', '/installer/<id>/')
+    if ($uri.Query -match 'X-Amz-|Signature=|Expires=|sig=') {
+        throw "[$label] URL is a short-lived signed download link (copied from browser downloads?), not the NinjaOne installer link. Use Copy Link from the Add Device / installer screen in the console."
+    }
     if (Test-Path $Path) { Remove-Item $Path -Force }
-    Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+    } catch {
+        $status = $null
+        if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+        $hint = switch ($status) {
+            403     { 'Link rejected: installer link expired, regenerated, or disabled in the console, or a web filter on this network blocked it. Open the same URL in a private browser window off this network to tell which.' }
+            404     { 'Installer not found: wrong or truncated URL, or the org/location was changed.' }
+            default { 'Check the URL and any proxy or web filter on this device.' }
+        }
+        throw "[$label] Download from $safeUrl failed (HTTP $status). $hint"
+    }
     $size = (Get-Item $Path).Length
-    if ($size -lt 1MB) { throw "Download from $Url is only $size bytes. Not a valid agent MSI (expired or wrong link?)." }
+    if ($size -lt 1MB) { throw "[$label] Download from $safeUrl is only $size bytes. Not a valid agent MSI (expired or wrong link?)." }
     if (-not $NoSignatureCheck) {
         $sig = Get-AuthenticodeSignature -FilePath $Path
         if ($sig.Status -ne 'Valid') { throw "Signature on $Path is '$($sig.Status)'. Refusing to use it." }
