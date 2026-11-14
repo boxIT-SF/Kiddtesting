@@ -77,6 +77,14 @@ if (-not $RollbackInstallerUrl -and $env:rollbackInstallerUrl) { $RollbackInstal
 if (-not $InstanceHost         -and $env:instanceHost)         { $InstanceHost         = $env:instanceHost }
 if ($env:preflightOnly -eq 'true') { $PreflightOnly = $true }
 
+# Pasted values often carry whitespace, quotes or a line break. Any of these breaks the URL
+# path and the CDN answers 403, not 404.
+function Repair-Value([string]$Value) { if ($Value) { ($Value -replace '[\r\n\t]', '').Trim().Trim('"', "'", '<', '>', ' ') } }
+$NewInstallerUrl      = Repair-Value $NewInstallerUrl
+$NewTokenId           = Repair-Value $NewTokenId
+$RollbackInstallerUrl = Repair-Value $RollbackInstallerUrl
+$InstanceHost         = Repair-Value $InstanceHost
+
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
     $line = '{0} [{1}] [{2}] {3}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Phase, $Level, $Message
@@ -117,18 +125,40 @@ function Get-Installer {
     if ($uri.Query -match 'X-Amz-|Signature=|Expires=|sig=') {
         throw "[$label] URL is a short-lived signed download link (copied from browser downloads?), not the NinjaOne installer link. Use Copy Link from the Add Device / installer screen in the console."
     }
+    Write-Log "[$label] URL host=$($uri.Host) pathLength=$($uri.AbsolutePath.Length) endsWithMsi=$($uri.AbsolutePath -like '*.msi') hasQuery=$([bool]$uri.Query)"
+    $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
     if (Test-Path $Path) { Remove-Item $Path -Force }
     try {
-        Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+        Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing -UserAgent $ua -MaximumRedirection 10
     } catch {
-        $status = $null
-        if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
-        $hint = switch ($status) {
-            403     { 'Link rejected: installer link expired, regenerated, or disabled in the console, or a web filter on this network blocked it. Open the same URL in a private browser window off this network to tell which.' }
-            404     { 'Installer not found: wrong or truncated URL, or the org/location was changed.' }
-            default { 'Check the URL and any proxy or web filter on this device.' }
+        $status = $null; $server = $null; $body = $null
+        $resp = $_.Exception.Response
+        if ($resp) {
+            $status = [int]$resp.StatusCode
+            $server = $resp.Headers['Server']
+            try {
+                $reader = New-Object IO.StreamReader($resp.GetResponseStream())
+                $body = ($reader.ReadToEnd() -replace '\s+', ' ')
+                if ($body.Length -gt 300) { $body = $body.Substring(0, 300) }
+            } catch { }
         }
-        throw "[$label] Download from $safeUrl failed (HTTP $status). $hint"
+        # Who answered tells you why: AmazonS3/CloudFront = bad or missing installer path,
+        # cloudflare = bot block, anything else = a proxy or filter on this network.
+        Write-Log "[$label] Invoke-WebRequest failed. HTTP=$status server='$server' finalUri='$($resp.ResponseUri.Host)$($resp.ResponseUri.AbsolutePath)' body='$body'" 'WARN'
+
+        $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+        if (-not (Test-Path $curl)) { throw "[$label] Download from $safeUrl failed (HTTP $status) and curl.exe is not available for a second attempt." }
+        if (Test-Path $Path) { Remove-Item $Path -Force }
+        $code = & $curl -L -sS -A $ua -o $Path -w '%{http_code}' $Url
+        Write-Log "[$label] curl.exe fallback returned HTTP $code."
+        if ("$code" -notmatch '200$') {
+            $hint = switch ($status) {
+                403     { 'Check the server and body above. S3/CloudFront AccessDenied = URL path is wrong (stray character, wrong field copied); HTML from a proxy = web filter blocking SYSTEM.' }
+                404     { 'Installer not found: wrong or truncated URL.' }
+                default { 'Check the URL and any proxy or web filter on this device.' }
+            }
+            throw "[$label] Download from $safeUrl failed (HTTP $status, curl $code). $hint"
+        }
     }
     $size = (Get-Item $Path).Length
     if ($size -lt 1MB) { throw "[$label] Download from $safeUrl is only $size bytes. Not a valid agent MSI (expired or wrong link?)." }
