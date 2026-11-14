@@ -1,0 +1,5 @@
+[
+  { "ssid": "Client-Corp",  "auth": "WPA2PSK", "key": "REPLACE-WITH-PASSPHRASE" },
+  { "ssid": "Client-Site2", "auth": "WPA3SAE", "key": "REPLACE-WITH-PASSPHRASE", "hidden": true },
+  { "ssid": "Client-Guest", "auth": "open", "autoConnect": false }
+]
